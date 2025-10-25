@@ -1,8 +1,6 @@
 #README
 
-######################################################
-     NOTAS SOBRE DECISIONES DE DISEÑO IMPORTANTES 
-######################################################
+#########  NOTAS SOBRE DECISIONES DE DISEÑO IMPORTANTES ##########
 
 1. Control de Acceso (AccessControl de OpenZeppelin)
 
@@ -171,3 +169,4 @@ Funciones para agregar y quitar tokens
 
 
 Motivo: Flexibilidad y control por roles (BANK_MANAGER_ROLE).
+
