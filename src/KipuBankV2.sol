@@ -184,7 +184,8 @@ contract KipuBank is AccessControl, ReentrancyGuard{
             emit PriceFeedSet(token, feed);
         }
     }
-
+    
+    /// @notice The function marks a token as unsupported and can only be executed by a user with the BANK_MANAGER_ROLE role, preventing any user from disabling support for a token.
     function unsupportToken(address token) external onlyRole(BANK_MANAGER_ROLE) {
         if (!isTokenSupported[token]) revert TokenNotSupported();
         isTokenSupported[token] = false;
@@ -214,6 +215,9 @@ contract KipuBank is AccessControl, ReentrancyGuard{
 
     /// @notice Deposits ETH into the user's personal vault.
     /// @dev Check global limit and record deposit.
+    /// @dev allows a user to deposit ETH or a token.
+    /// @dev updates their balance and total in USD.
+    /// @dev emits a deposit event.
     
     function deposit(address token, uint256 amount) external payable nonReentrant {
         uint256 usdValue6;
@@ -243,7 +247,11 @@ contract KipuBank is AccessControl, ReentrancyGuard{
 
     /// @notice Withdraws a specified amount of ETH from the user's vault.
     /// @param amount The amount of ETH to withdraw and uses secure transfers and custom errors.
-   
+    /// @dev user to withdraw ETH or token.
+    /// @dev check limits and balance. 
+    /// @dev update balances and total in USD and perform the secure transfer.
+    /// @dev issue a withdrawal event.
+    
    function withdraw(address token, uint256 amount) external nonReentrant {
         
         if(amount == 0) revert InvalidAmount();
