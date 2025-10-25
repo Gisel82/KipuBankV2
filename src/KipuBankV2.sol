@@ -12,44 +12,41 @@ import "@openzeppelin/contracts/access/AccessControl.sol";
 import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import "@chainlink/contracts/src/v0.8/interfaces/AggregatorV3Interface.sol";
 
 contract KipuBank is AccessControl, ReentrancyGuard{
     using SafeERC20 for IERC20;
   
-    // ==============
-    //     ROLES
-    // ==============
+    // ======================
+    //         ROLES
+    // ======================
 
     bytes32 public constant BANK_MANAGER_ROLE = keccak256("BANK_MANAGER_ROLE");
     
-    // ====================
-    // IMMUTABLE VARIABLES
-    // ====================
+    // =============================
+    // IMMUTABLE/CONSTANT VARIABLES
+    // =============================
     
 
     /// @notice Máximo permitido por transacción de retiro.
     uint256 public immutable maxWithdrawal;
 
     /// @notice Capacidad total del banco en ETH.
-    uint256 public immutable totalBankCapacity;
+    uint256 public immutable totalBankCapacityUSD;
 
+    ///@notice Oraculo chailink ETH/USD
+    AggregatorV3Interface public immutable ethUsdFeed;
     
-    // ==================
-    // STORAGE VARIABLES
-    // ==================
-
-    /// @notice Total actual de todos los depósitos en el contrato.
-    uint256 public totalDeposits;
-
-   
+    
     // ==============================
-    // MAPPINGS
+    //        ESTADO MAPPINGS
     // ==============================
 
-
+    mapping(address => AggregatorV3Interface) public priceFeedForToken; 
+    
     /// @notice User balances stored in the vault.
-    mapping(address => uint256) private vaultBalance;
+    mapping(address => mapping (address => uint256)) private vaultBalance;
 
     /// @notice Number of deposits made by each user.
     mapping(address => uint256) public depositCount;
@@ -58,32 +55,59 @@ contract KipuBank is AccessControl, ReentrancyGuard{
     mapping(address => uint256) public withdrawalCount;
 
 
-    // =======
-    // EVENTS
-    // =======
+    address[] private supportedTokens; //Supported tokens
+    mapping(address => bool) private isTokenSupported;
+
+    // ============================
+    //           TOTALES
+    // ============================
+
+    /// @notice Total actual de todos los depósitos en el contrato.
+
+    uint256 public totalDepositsUSD; //USDC-like (6 decimals)
+    
+   
+    // ===============================
+    //             EVENTS
+    // ===============================
 
 
-    /// @notice It is issued when the user makes a successful deposit.
-    /// @param user is the user's address 
-    ///@param  amount Amount of ETH deposited.
+    /// @notice Emitted when a user deposits an ETh or token into the contract.
+    /// @param user is the user's address. 
+    /// @param amount Amount of ETH deposited.
+    /// @param token what token it was.
+    /// @param usdValue6 its equivalent value in USD (with 6 decimal places).
 
-    event DepositMade(address indexed user, uint256 amount);
+    event DepositMade(address indexed user, address indexed token, uint256 amount, uint256 usdValue6);
     
     /// @notice It is issued when the user makes a successful withdrawal.
     /// @param user the user's address 
-   ///@param amount Amount of ETH withdrawn.
+    /// @param amount Amount of ETH withdrawn.
     
+    event WithdrawalMade(address indexed user, address indexed token, uint256 amount, uint256 usdValue6);
+    
+    /// @notice Emitted when an administrator (BANK_MANAGER_ROLE) adds support for a new ERC-20 token
+    event TokenSupported(address indexed  token);
+    
+    /// @notice Emitted when support for a previously accepted token is removed.
+    event TokenUnsupported(address indexed token);
 
-    event WithdrawalMade(address indexed user, uint256 amount);
+    /// @notice It is issued when a new oracle is assigned to a token, used to obtain its price in USD
+    event PriceFeedSet(address indexed token, address indexed feed);
 
+    /// @notice Emitted when the oracle associated with a token is deleted.
+    event PriceFeedRemoved(address indexed token);
 
+    /// @notice Emitted when the bank's main parameters are updated:
+    event ParamentersUpdated(uint256 newMaxWithdrawalWei, uint256 newCapacityUSD);
+    
     // ==============================
-    // CUSTOM ERRORS
+    //         CUSTOM ERRORS
     // ==============================
 
     /// @notice It is launched when a deposit exceeds the global banking capacity.
-    error MaxDepositExceeded();
-
+    ///error MaxDepositExceeded();
+     
     /// @notice When a withdrawal exceeds the transaction limit.
     error MaxWithdrawalExceeded();
 
@@ -95,89 +119,157 @@ contract KipuBank is AccessControl, ReentrancyGuard{
 
     /// @notice Thrown if you try to send ETH directly to the contract.
     error DirectTransferNotAllowed();
+    
+    /// @notice It is thrown if someone calls the contract with incorrect data.
+    error DirectCallNotAllowed();
+
+    /// @notice It is thrown if the token used is not supported by the bank
+    error TokenNotSupported();
 
     /// @notice Thrown if the maxRetiro value in the constructor is invalid.
     error MaximumWithdrawalInvalid();
-
+    
+    /// @notice Thrown if an ETH or token transfer fails
+    error TransferFailed();
+    
     /// @notice Thrown if the bank capacity in the constructor is invalid.
     error InvalidBankCapacity();
+    
+    /// @notice It is raised when the amount sent or requested is invalid
+    error InvalidAmount();
+    
+    /// @notice It is thrown if the oracle address
+    error InvalidOracle();
+    
+    ///@notice It is thrown if the Bank Cap Exceeded
+    error BankCapExceeded();
 
    
     // ==============================
-    // CONSTRUCTOR
+    //          CONSTRUCTOR
     // ==============================
 
     /// @notice Initializes the contract with the specified limits.
     /// @param _maxWithdrawal Maximum withdrawal limit per transaction.
-    /// @param _totalCapacity Total ETH capacity of the bank.
+    /// @param _totalCapacityUSD Total ETH capacity of the bank in USD.
     
-    constructor(uint256 _maxWithdrawal, uint256 _totalCapacity) {
+    constructor(uint256 _maxWithdrawal, uint256 _totalCapacityUSD, address _ethUsdFeed) {
         if (_maxWithdrawal == 0) revert MaximumWithdrawalInvalid();
-        if (_totalCapacity == 0) revert InvalidBankCapacity();
+        if (_totalCapacityUSD == 0) revert InvalidBankCapacity();
+        if (_ethUsdFeed == address(0)) revert InvalidOracle(); 
 
         maxWithdrawal = _maxWithdrawal;
-        totalBankCapacity = _totalCapacity;
+        totalBankCapacityUSD = _totalCapacityUSD;
+        ethUsdFeed = AggregatorV3Interface(_ethUsdFeed);
+
+        // Otorga roles al deployer
+        _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
+        _grantRole(BANK_MANAGER_ROLE, msg.sender);
     }
 
-    // ==============================
-    // MODIFIERS
-    // ==============================
+    // ======================================================
+    //              ADMINISTRATIVE FUNCTIONS
+    // ======================================================
 
-
-    /// @notice Verify that the amount sent is greater than 0.
-      
-    modifier nonZeroDeposit() {
-        if (msg.value == 0) revert ZeroDepositNotAllowed();
-        _;
-    }
-    
-    /// @notice Check that the withdrawal is within the maximum allowed.
-    /// @param amount Amount to withdraw.
-    
-    modifier withinWithdrawalLimit(uint256 amount) {
-        if (amount > maxWithdrawal) revert MaxWithdrawalExceeded();
-        _;
+    /// @notice Agrega soporte para un token ERC20 
+    function supportToken(address token, address feed) external onlyRole(BANK_MANAGER_ROLE) {
+        if (token == address(0)) revert TokenNotSupported();
+        if (!isTokenSupported[token]) {
+            supportedTokens.push(token);
+            isTokenSupported[token] = true;
+            emit TokenSupported(token);
+        }
+        if (feed != address(0)) {
+            priceFeedForToken[token] = AggregatorV3Interface(feed);
+            emit PriceFeedSet(token, feed);
+        }
     }
 
+    function unsupportToken(address token) external onlyRole(BANK_MANAGER_ROLE) {
+        if (!isTokenSupported[token]) revert TokenNotSupported();
+        isTokenSupported[token] = false;
+       
+        for (uint256 i = 0; i < supportedTokens.length; i++) {
+            if (supportedTokens[i] == token) {
+                supportedTokens[i] = supportedTokens[supportedTokens.length - 1];
+                supportedTokens.pop();
+                break;
+            }
+        }
+        delete priceFeedForToken[token];
+        emit TokenUnsupported(token);
+        emit PriceFeedRemoved(token);
+    }
+
+    function setPriceFeed(address token, address feed) external onlyRole(BANK_MANAGER_ROLE) {
+        if (token == address(0)) revert InvalidOracle(); // ETH feed viene del ethUsdFeed inmutable
+        priceFeedForToken[token] = AggregatorV3Interface(feed);
+        emit PriceFeedSet(token, feed);
+    }
+
+
     // ==============================
-    //  EXTERNAL PAYABLE FUNCTIONS
+    //           DEPOSITS
     // ==============================
 
     /// @notice Deposits ETH into the user's personal vault.
     /// @dev Check global limit and record deposit.
     
-    function deposit() external payable nonZeroDeposit {
-        if (totalDeposits + msg.value > totalBankCapacity) {
-            revert MaxDepositExceeded();
+    function deposit(address token, uint256 amount) external payable nonReentrant {
+        uint256 usdValue6;
+        if (token == address(0)) {
+           if (msg.value == 0) revert ZeroDepositNotAllowed();
+            usdValue6 = _convertEthToUSD(msg.value);
+            vaultBalance[msg.sender][address(0)] += msg.value;
+        }else{
+           if (!isTokenSupported[token]) revert TokenNotSupported();
+           if (amount == 0) revert ZeroDepositNotAllowed();
+           IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
+           usdValue6 = _convertTokenToUSD(token, amount);
+           vaultBalance[msg.sender][token] += amount; 
         }
-
-        vaultBalance[msg.sender] += msg.value;
-        totalDeposits += msg.value;
+        
+        uint256 newTotalUSD = totalDepositsUSD + usdValue6;
+        if (newTotalUSD > totalBankCapacityUSD) revert BankCapExceeded();
+        totalDepositsUSD = newTotalUSD;
         depositCount[msg.sender]++;
 
-        emit DepositMade(msg.sender, msg.value);
+        emit DepositMade(msg.sender, token, token == address(0) ? msg.value : amount, usdValue6);
     }
+
+    // ==============================
+    //           WITHDRAW
+    // ==============================
 
     /// @notice Withdraws a specified amount of ETH from the user's vault.
     /// @param amount The amount of ETH to withdraw and uses secure transfers and custom errors.
    
-   function withdraw(uint256 amount) external withinWithdrawalLimit(amount) {
-        uint256 balance = vaultBalance[msg.sender];
+   function withdraw(address token, uint256 amount) external nonReentrant {
+        
+        if(amount == 0) revert InvalidAmount();
+        if(amount > maxWithdrawal) revert MaxWithdrawalExceeded();
+        
+        uint256 balance = vaultBalance[msg.sender][token];
         if (balance < amount) revert InsufficientBalance();
+        
+        uint256 usdValue6 = token == address(0) ? _convertEthToUSD(amount) : _convertTokenToUSD(token, amount);
 
-        unchecked {
-            vaultBalance[msg.sender] = balance - amount;
-            totalDeposits -= amount;
+        vaultBalance[msg.sender][token] = balance - amount;
+        totalDepositsUSD -= usdValue6;
+        withdrawalCount[msg.sender]++;
+        
+        if (token == address(0)) {
+            (bool success, ) = msg.sender.call{value: amount}("");
+            if (!success) revert TransferFailed();
+        } else {
+            IERC20(token).safeTransfer(msg.sender, amount);
         }
 
-        withdrawalCount[msg.sender]++;
-        _safeTransfer(msg.sender, amount);
-
-        emit WithdrawalMade(msg.sender, amount);
+        emit WithdrawalMade(msg.sender, token, amount, usdValue6);
     }
 
     //===========================
-    // EXTERNAL  VIEW FUNCTIONS
+    // FUNCIONES DE CONSULTA
     //===========================
     
     /// @notice Returns the current vault balance of a given user.
@@ -185,8 +277,12 @@ contract KipuBank is AccessControl, ReentrancyGuard{
     /// @return The ETH balance of the user in the vault.
 
       
-    function getBalance(address user) external view returns (uint256) {
-        return vaultBalance[user];
+    function getUserBalance(address user, address token) external view returns (uint256) {
+        return vaultBalance[user][token];
+    }
+    
+    function getSupportedTokens() external  view returns(address[] memory){
+        return supportedTokens;
     }
 
     // ==================
@@ -203,12 +299,73 @@ contract KipuBank is AccessControl, ReentrancyGuard{
         if (!success) revert();
     }
 
-    // ==================
-    // RECEIVE FUNCTION
-    // ==================
+    
+    // ===========================
+    //    ORACULO DE CHAINLINK
+    // ===========================
 
-    /// @notice Rejects direct ETH transfers.
+     function getLatestEthPrice() public view returns (uint256) {
+        (, int256 price, , , ) = ethUsdFeed.latestRoundData();
+        // price viene con 8 decimales
+        return uint256(price);
+    }
+
+    
+    //@notice Convierte ETH depositado a USD (según Chainlink).
+    
+    function getTotalDepositsInUSD(address user) external view returns (uint256 totalUSD){
+        for (uint256 i = 0; i < supportedTokens.length; i++) {
+            address token = supportedTokens[i];
+            uint256 balance = vaultBalance[user][token];
+            if (balance > 0) totalUSD += _convertTokenToUSD(token, balance);
+        }
+
+        totalUSD += _convertEthToUSD(vaultBalance[user][address(0)]);
+    }
+    
+    // =========================
+    //     INTERNAL HELPERS
+    // =========================
+    
+    function _convertEthToUSD(uint256 amount) internal view returns (uint256) {
+        uint256 price = getLatestEthPrice(); // 8 decimales
+        return (amount * price) / 1e8; // USD 6 decimales
+    }
+
+    function _convertTokenToUSD(address token, uint256 amount) internal view returns (uint256) {
+        AggregatorV3Interface feed = priceFeedForToken[token];
+        if (address(feed) == address(0)) revert InvalidOracle();
+        (, int256 price, , , ) = feed.latestRoundData();
+        uint8 decimals = IERC20Metadata(token).decimals();
+        uint256 normalized = _normalizeToUSDCDecimals(amount, decimals);
+        return (normalized * uint256(price)) / 1e8;
+    }
+    
+    // ================================
+    //    NORMALIZACION DE DECIMALES
+    // ================================
+     
+    /// @notice Convierte montos con distintos decimales a los de USDC (6 decimales).
+     
+    function _normalizeToUSDCDecimals(uint256 amount, uint8 tokenDecimals) internal pure returns (uint256){
+        if (tokenDecimals > 6) {
+            return amount / (10 ** (tokenDecimals - 6));
+        } else if (tokenDecimals < 6) {
+            return amount * (10 ** (6 - tokenDecimals));
+        } else {
+            return amount;
+        }
+    }
+  
+    // ================================
+    //        RECEPCION DE ETH
+    // ================================
+
     receive() external payable {
         revert DirectTransferNotAllowed();
+    }
+
+    fallback() external payable {
+        revert DirectCallNotAllowed();
     }
 }
