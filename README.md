@@ -1,6 +1,6 @@
 #README
 
-#########  NOTAS SOBRE DECISIONES DE DISEÑO IMPORTANTES ##########
+########## NOTAS SOBRE DECISIONES DE DISEÑO IMPORTANTES ##########
 
 1. Control de Acceso (AccessControl de OpenZeppelin)
 
@@ -135,11 +135,7 @@ Cada error tiene un selector distinto.
 
 Si agregas nuevos errores/eventos, debes reflejarlos en tus pruebas y front-end.
 
-
-==============================================
-         MEJORAS REALIZADAS Y MOTIVOS
-==============================================
-
+#################### MEJORAS REALIZADAS Y MOTIVOS ####################
 
 Variables locales en deposit y withdraw
 
@@ -169,4 +165,5 @@ Funciones para agregar y quitar tokens
 
 
 Motivo: Flexibilidad y control por roles (BANK_MANAGER_ROLE).
+
 
